@@ -1,140 +1,161 @@
 import random
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 from game.logic.base import BaseLogic
 from game.models import GameObject, Board, Position
 
 class Bot_logic(BaseLogic):
+    """
+    Bot ini berfokus pada pengumpulan berlian secara efisien dengan menghitung
+    rasio "keuntungan" (poin per jarak) dan memiliki strategi untuk kembali ke markas
+    secara strategis.
+    """
     def __init__(self):
-        # Waktu sisa (dalam milidetik) sebagai ambang batas untuk pulang
-        self.TIME_TO_GO_HOME_THRESHOLD = 15000
+        # Waktu sisa (dalam milidetik) yang memicu bot untuk segera pulang.
+        self.URGENCY_TIMER_LIMIT = 15000
+        # Jumlah minimum berlian yang dimiliki untuk mempertimbangkan pulang jika tidak ada berlian lain di sekitar.
+        self.CASH_OUT_THRESHOLD = 3
+        # Jarak radius untuk memeriksa keberadaan berlian di sekitar.
+        self.NEARBY_RADIUS = 5
 
-    def get_game_objects(self, board: Board):
-        """Memindai dan mengkategorikan semua objek di papan."""
-        self.diamonds = [obj for obj in board.game_objects if obj.type == "DiamondGameObject"]
-        self.bots = [obj for obj in board.game_objects if obj.type == "BotGameObject"]
-        self.teleports = [obj for obj in board.game_objects if obj.type == "TeleportGameObject"]
+        # Properti ini akan diisi oleh 'scan_board_state'
+        self.gem_locations: List[GameObject] = []
+        self.other_bots: List[GameObject] = []
+        self.portals: List[GameObject] = []
 
-    def calculate_distance(self, pos1: Position, pos2: Position) -> float:
-        """Menghitung jarak Euclidean antara dua objek Position."""
-        return ((pos2.x - pos1.x) ** 2 + (pos2.y - pos1.y) ** 2) ** 0.5
-    
-    # --- FUNGSI BARU ---
-    def is_diamond_nearby(self, current_pos: Position, radius: int) -> bool:
+    def scan_board_state(self, game_state: Board):
+        """Mengkategorikan semua objek game di papan untuk akses yang lebih mudah."""
+        # Reset daftar sebelum setiap pemindaian
+        self.gem_locations.clear()
+        self.other_bots.clear()
+        self.portals.clear()
+        
+        for item in game_state.game_objects:
+            if item.type == "DiamondGameObject":
+                self.gem_locations.append(item)
+            elif item.type == "BotGameObject":
+                self.other_bots.append(item)
+            elif item.type == "TeleportGameObject":
+                self.portals.append(item)
+
+    def calculate_dist(self, p1: Position, p2: Position) -> float:
+        """Menghitung jarak garis lurus antara dua objek Position."""
+        return ((p1.x - p2.x)**2 + (p1.y - p2.y)**2)**0.5
+
+    def check_local_gem_presence(self, my_location: Position, search_radius: int) -> bool:
         """
-        Mengecek apakah ada berlian dalam radius blok tertentu (jarak kotak).
+        Memeriksa apakah ada berlian dalam radius kotak tertentu (jarak Manhattan).
         """
-        for diamond in self.diamonds:
-            # Hitung jarak horizontal dan vertikal
-            dist_x = abs(diamond.position.x - current_pos.x)
-            dist_y = abs(diamond.position.y - current_pos.y)
-            # Jika ada satu saja berlian dalam jangkauan, kembalikan True
-            if dist_x <= radius and dist_y <= radius:
+        for gem in self.gem_locations:
+            # Hitung jarak absolut pada sumbu x dan y
+            delta_x = abs(gem.position.x - my_location.x)
+            delta_y = abs(gem.position.y - my_location.y)
+            # Jika ada berlian dalam jangkauan pencarian, kembalikan True
+            if delta_x <= search_radius and delta_y <= search_radius:
                 return True
-        # Jika loop selesai dan tidak ada berlian terdekat, kembalikan False
         return False
 
-    def find_path(self, current_pos: Position, target_pos: Position) -> Tuple[float, Position]:
+    def determine_optimal_route(self, start_pos: Position, end_pos: Position) -> Tuple[float, Position]:
         """
-        Menemukan jalur tercepat ke target, mempertimbangkan teleport.
-        Mengembalikan (jarak, posisi_langkah_selanjutnya).
+        Menentukan rute terbaik ke tujuan, dengan mempertimbangkan teleport.
+        Mengembalikan tuple berisi (total_jarak, tujuan_langkah_berikutnya).
+        Tujuan berikutnya bisa berupa posisi akhir atau teleport masuk.
         """
-        # 1. Hitung jarak langsung
-        direct_distance = self.calculate_distance(current_pos, target_pos)
-        path_cost = direct_distance
-        next_step_pos = target_pos
+        # Rute 1: Perjalanan langsung
+        direct_route_dist = self.calculate_dist(start_pos, end_pos)
 
-        # 2. Hitung jarak via teleport jika ada teleport
-        if len(self.teleports) >= 2:
-            # Cari teleport terdekat dari posisi saat ini
-            nearest_teleport_in = min(self.teleports, key=lambda t: self.calculate_distance(current_pos, t.position))
+        # Rute 2: Menggunakan teleport (jika tersedia)
+        if len(self.portals) >= 2:
+            # Cari portal terdekat dari posisi awal
+            entry_portal = min(self.portals, key=lambda p: self.calculate_dist(start_pos, p.position))
+            # Cari portal terdekat dari posisi tujuan
+            exit_portal = min(self.portals, key=lambda p: self.calculate_dist(end_pos, p.position))
             
-            # Cari teleport terdekat dari tujuan akhir
-            nearest_teleport_out = min(self.teleports, key=lambda t: self.calculate_distance(target_pos, t.position))
+            # Hitung total jarak jika melalui portal
+            portal_route_dist = self.calculate_dist(start_pos, entry_portal.position) + self.calculate_dist(exit_portal.position, end_pos)
 
-            teleport_distance = self.calculate_distance(current_pos, nearest_teleport_in.position) + self.calculate_distance(nearest_teleport_out.position, target_pos)
+            # Jika rute portal lebih pendek, gunakan itu
+            if portal_route_dist < direct_route_dist:
+                # Tujuan langsung berikutnya adalah portal masuk
+                return portal_route_dist, entry_portal.position
 
-            # Jika rute teleport lebih pendek, gunakan itu
-            if teleport_distance < path_cost:
-                path_cost = teleport_distance
-                next_step_pos = nearest_teleport_in.position
+        # Jika tidak ada portal atau rute langsung lebih cepat, tuju langsung ke 'end_pos'
+        return direct_route_dist, end_pos
 
-        return path_cost, next_step_pos
+    def next_move(self, my_robot: GameObject, game_state: Board) -> Tuple[int, int]:
+        """Fungsi pengambilan keputusan utama untuk bot."""
+        self.scan_board_state(game_state)
+        robot_stats = my_robot.properties
+        my_location = my_robot.position
+        
+        # Secara default, bot akan pulang jika tidak ada target lain
+        target_destination = robot_stats.base
+        is_returning_home = False
 
-    def next_move(self, board_bot: GameObject, board: Board) -> Tuple[int, int]:
-        """Fungsi utama untuk menentukan langkah logis berikutnya."""
-        self.get_game_objects(board)
-        props = board_bot.properties
-        current_pos = board_bot.position
+        # --- HIRARKI KEPUTUSAN ---
+        time_left = robot_stats.milliseconds_left or float('inf')
 
-        # --- HIRARKI PENGAMBILAN KEPUTUSAN ---
+        # 1. Prioritas Tinggi: Waktu hampir habis dan membawa berlian. Pulang!
+        if time_left < self.URGENCY_TIMER_LIMIT and robot_stats.diamonds > 0:
+            is_returning_home = True
+        # 2. Inventaris Penuh: Tidak bisa membawa lebih banyak. Pulang!
+        elif robot_stats.diamonds >= robot_stats.inventory_size:
+            is_returning_home = True
+        # 3. Mundur Strategis: Punya cukup berlian dan tidak ada lagi di sekitar. Pulang!
+        elif robot_stats.diamonds >= self.CASH_OUT_THRESHOLD and not self.check_local_gem_presence(my_location, self.NEARBY_RADIUS):
+            is_returning_home = True
 
-        # 1. PRIORITAS TERTINGGI: Waktu hampir habis? Segera pulang!
-        time_left = props.milliseconds_left or float('inf')
-        if time_left < self.TIME_TO_GO_HOME_THRESHOLD and props.diamonds > 0:
-            _, goals_pos = self.find_path(current_pos, props.base)
-
-        # 2. PRIORITAS KEDUA: Inventaris penuh? Pulang!
-        elif props.diamonds >= props.inventory_size:
-            _, goals_pos = self.find_path(current_pos, props.base)
-
-        # --- LOGIKA BARU ---
-        # 3. PRIORITAS KETIGA: Punya >= 3 berlian & tidak ada berlian lain di sekitar? Pulang!
-        elif props.diamonds >= 3 and not self.is_diamond_nearby(current_pos, 5):
-            _, goals_pos = self.find_path(current_pos, props.base)
-
-        # 4. PRIORITAS TERAKHIR: Cari berlian yang paling "menguntungkan"
-       # --- LOGIKA BARU ---
-        # 4. PRIORITAS TERAKHIR: Cari berlian yang paling "MENGUNTUNGKAN"
+        # Tentukan tujuan berdasarkan keputusan di atas
+        if is_returning_home:
+            _, target_destination = self.determine_optimal_route(my_location, robot_stats.base)
         else:
-            best_target_pos = None
-            # Kita tidak lagi menggunakan biaya, tapi "skor keuntungan"
-            best_profit_score = -1.0 
-            inventory_space = props.inventory_size - props.diamonds
+            # 4. Aksi Standar: Cari berlian yang paling menguntungkan.
+            optimal_gem_location = None
+            max_value_ratio = -1.0 # Inisialisasi dengan nilai negatif
+            inventory_room = robot_stats.inventory_size - robot_stats.diamonds
 
-            for diamond in self.diamonds:
-                points = diamond.properties.points or 1
-                if points <= inventory_space:
-                    # Hitung biaya (jarak) untuk mendapatkan berlian ini
-                    cost, _ = self.find_path(current_pos, diamond.position)
+            for gem in self.gem_locations:
+                gem_points = gem.properties.points or 1
+                if gem_points <= inventory_room:
+                    # Hitung "biaya" (jarak) untuk mendapatkan berlian ini
+                    cost_to_reach, _ = self.determine_optimal_route(my_location, gem.position)
                     
-                    # Hindari pembagian dengan nol jika bot sudah di atas berlian
-                    if cost == 0:
-                        cost = 0.01
+                    # Hindari pembagian dengan nol jika bot berada tepat di atas berlian
+                    cost_to_reach = max(cost_to_reach, 0.01)
 
-                    # Hitung skor keuntungan (poin dibagi jarak)
-                    profit_score = points / cost
+                    # Keuntungan = Poin / Jarak
+                    value_per_distance = gem_points / cost_to_reach
                     
-                    # Jika skor keuntungan berlian ini lebih baik, jadikan target baru
-                    if profit_score > best_profit_score:
-                        best_profit_score = profit_score
-                        best_target_pos = diamond.position
+                    if value_per_distance > max_value_ratio:
+                        max_value_ratio = value_per_distance
+                        optimal_gem_location = gem.position
             
-            # Jika ditemukan berlian yang menguntungkan, kejar itu
-            if best_target_pos:
-                _, goals_pos = self.find_path(current_pos, best_target_pos)
-            # Jika tidak ada berlian yang bisa dikejar, pulang saja
-            else:
-                _, goals_pos = self.find_path(current_pos, props.base)
-        # --- PERHITUNGAN GERAKAN AKHIR ---
-        if goals_pos.x == current_pos.x and goals_pos.y == current_pos.y:
+            # Jika ditemukan berlian yang cocok, kejar. Jika tidak, bot akan tetap pada tujuan default (pulang).
+            if optimal_gem_location:
+                _, target_destination = self.determine_optimal_route(my_location, optimal_gem_location)
+
+        # --- EKSEKUSI GERAKAN ---
+        # Jika sudah berada di tujuan (misalnya, terjebak), bergerak acak
+        if target_destination == my_location:
             return random.choice([(1, 0), (-1, 0), (0, 1), (0, -1)])
 
-        delta_x, delta_y = 0, 0
-        if current_pos.x < goals_pos.x:
-            delta_x = 1
-        elif current_pos.x > goals_pos.x:
-            delta_x = -1
+        # Hitung vektor gerakan
+        move_x, move_y = 0, 0
+        if target_destination.x > my_location.x:
+            move_x = 1
+        elif target_destination.x < my_location.x:
+            move_x = -1
         
-        if current_pos.y < goals_pos.y:
-            delta_y = 1
-        elif current_pos.y > goals_pos.y:
-            delta_y = -1
-        
-        if delta_x != 0 and delta_y != 0:
-            if random.random() < 0.5:
-                delta_y = 0
+        if target_destination.y > my_location.y:
+            move_y = 1
+        elif target_destination.y < my_location.y:
+            move_y = -1
+
+        # Mencegah gerakan diagonal dengan memprioritaskan sumbu dengan jarak terbesar
+        if move_x != 0 and move_y != 0:
+            if abs(target_destination.x - my_location.x) > abs(target_destination.y - my_location.y):
+                move_y = 0
             else:
-                delta_x = 0
-        
-        return delta_x, delta_y
+                move_x = 0
+                
+        return move_x, move_y
