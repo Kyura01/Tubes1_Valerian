@@ -44,7 +44,7 @@ Dalam setiap keputusan pergerakan, baik menuju diamond (seperti pada poin 2) mau
 
     ```
     git clone https://github.com/Kyura01/Tubes1_Valerian
-    cd ./tubes1-IF2110-bot-starter-pack
+    cd ./tubes1-IF2110-bot-starter-pack/Bot-gem
     ```
 
 2. Install dependencies
